@@ -1,6 +1,10 @@
 use std::collections::HashSet;
+use std::collections::VecDeque;
 use std::io;
 use std::io::Write;
+use std::sync::mpsc::{Sender, Receiver};
+use std::sync::mpsc;
+use std::thread;
 
 #[derive(PartialEq,Debug)]
 enum ParameterMode {
@@ -30,31 +34,41 @@ fn get_program_from_string(string:String) -> Vec<i32> {
     return program;
 }
 
-fn execute_program(program:Vec<i32>, inputs: Vec<String>) -> (Vec<i32>, Vec<String>) {
+fn execute_program(program:Vec<i32>, id:&str, initial_input: &mut VecDeque<i32>, input_rx: Receiver<i32>, output_tx: Sender<i32>) -> i32 {
     let mut new_program = program.clone();
 
     let mut pc: usize = 0;
     let mut current_instruction: i32 = 0;
 
-    let mut inputs = inputs.iter();
-    let mut outputs = vec![];
+    let mut program_output = 0;
 
     while current_instruction != 99 {
         let instruction = get_instruction_at_index(pc, &new_program);
 
         current_instruction = instruction.code;
-        pc = pc + instruction.size;
 
         let mut input = None;
 
         if current_instruction == 3 {
-            input = inputs.next();
+            let init_input = initial_input.pop_front();
+
+            match init_input {
+                None => input = {
+                    println!("program {} waiting on recv...", id);
+                    Some(input_rx.recv().unwrap())
+                },
+                Some(_) => input = init_input,
+            }
         }
+
+        pc = pc + instruction.size;
 
         let (executed_program, jump_address, output) = execute_instruction(instruction, &new_program, input);
 
         if let Some(out) = output {
-            outputs.push(out);
+            println!("program {} sending {}...", id, out);
+            output_tx.send(out);
+            program_output = out;
         }
 
         new_program = executed_program;
@@ -65,37 +79,10 @@ fn execute_program(program:Vec<i32>, inputs: Vec<String>) -> (Vec<i32>, Vec<Stri
         };
     }
 
-    return (new_program, outputs);
+    return program_output;
 }
 
-trait Input {
-    fn get_input_from_stdin(&self) -> String {
-        let mut input = String::new();
-
-        match io::stdin().read_line(&mut input) {
-            Ok(_n) => (),
-            Err(error) => println!("error: {}", error),
-        };
-
-        return input.trim_end().to_string();
-    }
-}
-
-trait Output {
-    fn write_string_to_stdout(&self, output:String) {
-        match io::stdout().write_fmt(format_args!("output: {:}\n", output)) {
-            Ok(_n) => (),
-            Err(error) => println!("error: {}", error),
-        };
-
-        match io::stdout().flush() {
-            Ok(_n) => (),
-            Err(error) => println!("error: {}", error),
-        };
-    }
-}
-
-fn execute_instruction(instruction:Instruction, program:&Vec<i32>, input:Option<&String>) -> (Vec<i32>, Option<i32>, Option<String>) {
+fn execute_instruction(instruction:Instruction, program:&Vec<i32>, input:Option<i32>) -> (Vec<i32>, Option<i32>, Option<i32>) {
     let mut new_program = program.clone();
 
     match instruction.code {
@@ -119,7 +106,7 @@ fn execute_instruction(instruction:Instruction, program:&Vec<i32>, input:Option<
         3 => {
             // Input
             if let Some(i) = input {
-                let val = i.parse::<i32>().unwrap();
+                let val = i;
 
                 new_program[instruction.p1 as usize] = val;
             }
@@ -128,8 +115,7 @@ fn execute_instruction(instruction:Instruction, program:&Vec<i32>, input:Option<
             // Output
             let output = if instruction.p1_mode == ParameterMode::Position {program[instruction.p1 as usize]} else {instruction.p1};
 
-            // write_output(output.to_string());
-            return (new_program, None, Some(output.to_string()))
+            return (new_program, None, Some(output))
         },
         5 => {
             // Jump-if-true
@@ -231,18 +217,82 @@ fn get_instruction_at_index(idx:usize, program:&Vec<i32>) -> Instruction {
     return instruction;
 }
 
-fn run_program_in_amplifiers(program:Vec<i32>, phases:[i32;5]) -> i32 {
-    let mut output = 0;
+// fn run_program_in_amplifiers(program:Vec<i32>, phases:[i32;5]) -> i32 {
+//     let mut output = 0;
 
-    for a in 0..5 {
-        let inputs = vec![phases[a].to_string(), output.to_string()];
+//     for a in 0..5 {
+//         let inputs = vec![phases[a].to_string(), output.to_string()];
 
-        let (_, program_output) = execute_program(program.clone(), inputs);
+//         let (_, program_output) = execute_program(program.clone(), inputs);
 
-        if program_output.len() > 0 {
-            output = program_output[0].parse::<i32>().unwrap();
-        }
-    }
+//         if program_output.len() > 0 {
+//             output = program_output[0].parse::<i32>().unwrap();
+//         }
+//     }
+
+//     return output;
+// }
+
+fn run_program_in_amplifiers_with_feedback(program:Vec<i32>, phases:[i32;5]) -> i32 {
+    let (tx_init, rx_0): (Sender<i32>, Receiver<i32>) = mpsc::channel();
+    let (tx_0, rx_1): (Sender<i32>, Receiver<i32>) = mpsc::channel();
+    let (tx_1, rx_2): (Sender<i32>, Receiver<i32>) = mpsc::channel();
+    let (tx_2, rx_3): (Sender<i32>, Receiver<i32>) = mpsc::channel();
+    let (tx_3, rx_4): (Sender<i32>, Receiver<i32>) = mpsc::channel();
+    let (tx_final, rx_out): (Sender<i32>, Receiver<i32>) = mpsc::channel();
+
+    let (program0, program1, program2, program3, program4) = (program.clone(), program.clone(), program.clone(), program.clone(), program.clone());
+
+    tx_init.send(0);
+
+    // 0
+    let child0 = thread::spawn(move || {
+        let mut initial_input = VecDeque::new();
+        initial_input.push_back(phases[0]);
+        execute_program(program0.clone(), "0", &mut initial_input, rx_0, tx_0);
+    });
+
+    // 1
+    let child1 = thread::spawn(move || {
+        let mut initial_input = VecDeque::new();
+        initial_input.push_back(phases[1]);
+        execute_program(program1.clone(), "1", &mut initial_input, rx_1, tx_1);
+    });
+
+    // 2
+    let child2 = thread::spawn(move || {
+        let mut initial_input = VecDeque::new();
+        initial_input.push_back(phases[2]);
+        execute_program(program2.clone(), "2", &mut initial_input, rx_2, tx_2);
+    });
+
+    // 3
+    let child3 = thread::spawn(move || {
+        let mut initial_input = VecDeque::new();
+        initial_input.push_back(phases[3]);
+        execute_program(program3.clone(), "3", &mut initial_input, rx_3, tx_3);
+    });
+
+    // 4
+    let child4 = thread::spawn(move || {
+        let mut initial_input = VecDeque::new();
+        initial_input.push_back(phases[4]);
+        let final_out = execute_program(program4.clone(), "4", &mut initial_input, rx_4, tx_init);
+
+        tx_final.send(final_out);
+    });
+
+    println!("waiting on children...");
+
+    child0.join();
+    child1.join();
+    child2.join();
+    child3.join();
+    child4.join();
+
+    println!("waiting on rx_out...");
+
+    let mut output = rx_out.recv().unwrap();
 
     return output;
 }
@@ -260,11 +310,14 @@ fn main() -> io::Result<()> {
     let mut max_output = 0;
     let mut max_phases = [0,0,0,0,0];
 
-    for p0 in 0..5 {
-        for p1 in 0..5 {
-            for p2 in 0..5 {
-                for p3 in 0..5 {
-                    for p4 in 0..5 {
+    // let phase_range = 0..5;
+    let phase_range = 5..10;
+
+    for p0 in phase_range.clone() {
+        for p1 in phase_range.clone() {
+            for p2 in phase_range.clone() {
+                for p3 in phase_range.clone() {
+                    for p4 in phase_range.clone() {
                         let phases = [p0,p1,p2,p3,p4];
                         let phases_set: HashSet<i32> = phases.iter().cloned().collect();
 
@@ -272,7 +325,7 @@ fn main() -> io::Result<()> {
                             continue;
                         }
 
-                        let output = run_program_in_amplifiers(program.clone(), phases);
+                        let output = run_program_in_amplifiers_with_feedback(program.clone(), phases);
 
                         if output > max_output {
                             max_output = output;
