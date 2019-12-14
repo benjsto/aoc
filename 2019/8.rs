@@ -1,4 +1,5 @@
 use std::io;
+use std::io::Write;
 
 const WIDTH: usize = 25;
 const HEIGHT: usize = 6;
@@ -36,9 +37,40 @@ fn main() -> io::Result<()> {
     let num_ones = least_zeros_layer.iter().filter(|&&i| i == 1).count();
     let num_twos = least_zeros_layer.iter().filter(|&&i| i == 2).count();
 
-    println!("result: {}", num_ones * num_twos);
+    println!("num_ones * num_twos: {}", num_ones * num_twos);
+
+    let mut result_image = vec![];
+
+    for i in 0..WIDTH*HEIGHT {
+        let mut pixel = 2;
+        let mut j = 0;
+
+        while pixel == 2 {
+            pixel = layers[j][i];
+
+            j += 1;
+        }
+
+        result_image.push(pixel);
+    }
+
+    println!("result_image: {:?}", result_image);
+
+    print_image(result_image);
 
     Ok(())
+}
+
+fn print_image(image:Vec<i32>) {
+    for y in 0..HEIGHT {
+        for x in 0..WIDTH {
+            let s = if image[WIDTH*y + x] == 0 { " " } else { "#"};
+
+            io::stdout().write_all(s.as_bytes());
+        }
+        io::stdout().write_all(b"\n");
+    }
+    io::stdout().flush();
 }
 
 fn get_raw_from_string(input:String) -> Vec<i32> {
